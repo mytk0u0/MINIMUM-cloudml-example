@@ -2,3 +2,9 @@ notebooks
 .ipynb_checkpoints
 .mypy_cache
 .DS_Store
+__pycache__
+
+data/MNIST_data/*
+data/tfrecords/*
+models/*
+!.gitkeep
