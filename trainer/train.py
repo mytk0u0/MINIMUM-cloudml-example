@@ -2,13 +2,16 @@ import os
 import argparse
 import tensorflow as tf
 
+tf.logging.set_verbosity(tf.logging.INFO)
+
 BATCH_SIZE = 50
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--data_dir', type=str, required=True)
 parser.add_argument('--model_dir', type=str, required=True)
-parser.add_argument('--num_epochs', type=int, required=True)
+parser.add_argument('--max_steps', type=int, required=True)
 args = parser.parse_args()
+
 tfrecord_dir = os.path.join(args.data_dir, 'tfrecords')
 
 
@@ -28,7 +31,8 @@ def parse_tfrecord(record_string):
     return image, label
 
 
-def batch_fn(filenames, repeat_count=-1):
+def input_fn(filenames, repeat_count=-1):
+    """featuresとlabelsを返すようにtrain_input_fnを定義する"""
     dataset = tf.data.TFRecordDataset(filenames)
     dataset = dataset.map(parse_tfrecord)
     dataset = dataset.repeat(count=repeat_count)  # デフォルトは無限回
@@ -41,15 +45,20 @@ def batch_fn(filenames, repeat_count=-1):
 
 def train_input_fn():
     path = os.path.join(tfrecord_dir, 'train.tfrecord')
-    return batch_fn([path])
+    return input_fn([path])
 
 
 def eval_input_fn():
     path = os.path.join(tfrecord_dir, 'validation.tfrecord')
-    return batch_fn([path], repeat_count=1)
+    return input_fn([path], repeat_count=1)
 
 
-# ネットワークの準備
+def json_serving_input_fn():
+    inputs = {
+        'image': tf.placeholder(tf.uint8, shape=[None, 28, 28, 3])
+    }
+    return tf.estimator.export.ServingInputReceiver(inputs, inputs)
+
 
 def preprocess(image):
     return tf.to_float(image) * 2 / 255 - 1
@@ -84,10 +93,14 @@ def network(images, mode):
     return logits
 
 
-# モデルの作成
-
 def model_fn(features, labels, mode):
-    """Model function for CNN."""
+    """
+    tf.estimator.Estimatorに引き渡す。この関数は、eatures, labels,
+    mode, (params) の順に引数を受け取るような関数として定義する必要がある。
+
+    paramsを指定した場合、tf.estimator.Estimatorの引数として
+    与えられたparamsを受け取ることができる。
+    """
 
     logits = network(features['image'], mode)
 
@@ -97,9 +110,13 @@ def model_fn(features, labels, mode):
         # probabilitiesは予測結果をグラフに出力するのに使う
         "probabilities": tf.nn.softmax(logits, name="softmax_tensor")
     }
+    export_outputs = {
+        'predict_output': tf.estimator.export.PredictOutput(predictions)
+    }
 
     if mode == tf.estimator.ModeKeys.PREDICT:  # 予測時
-        return tf.estimator.EstimatorSpec(mode=mode, predictions=predictions)
+        return tf.estimator.EstimatorSpec(
+            mode=mode, predictions=predictions, export_outputs=export_outputs)
 
     loss = tf.losses.sparse_softmax_cross_entropy(labels=labels, logits=logits)
 
@@ -111,10 +128,10 @@ def model_fn(features, labels, mode):
         return tf.estimator.EstimatorSpec(
             mode=mode, loss=loss, train_op=train_op)
 
-    eval_metric_ops = {"accuracy": tf.metrics.accuracy(
-        labels=labels,
-        predictions=predictions["classes"]
-    )}
+    eval_metric_ops = {
+        "accuracy": tf.metrics.accuracy(
+            labels=labels, predictions=predictions["classes"])
+    }
 
     if mode == tf.estimator.ModeKeys.EVAL:
         return tf.estimator.EstimatorSpec(  # 評価時
@@ -124,19 +141,28 @@ def model_fn(features, labels, mode):
 
 
 def main():
-    model = tf.estimator.Estimator(model_fn=model_fn, model_dir=args.model_dir)
+    train_spec = tf.estimator.TrainSpec(
+        train_input_fn,
+        max_steps=args.max_steps,
+    )
 
-    tensors_to_log = {"probabilities": "softmax_tensor"}
-    logging_hook = tf.train.LoggingTensorHook(
-        tensors=tensors_to_log, every_n_iter=50)
+    exporter = tf.estimator.FinalExporter(
+        'mnist',
+        json_serving_input_fn
+    )
+    eval_spec = tf.estimator.EvalSpec(
+        eval_input_fn,
+        steps=100,
+        exporters=[exporter],
+        name='mnist-eval'
+    )
 
-    model.train(
-        input_fn=train_input_fn, steps=args.num_epochs, hooks=[logging_hook])
+    estimator = tf.estimator.Estimator(
+        model_fn=model_fn, model_dir=args.model_dir)
 
-    eval_results = model.evaluate(input_fn=eval_input_fn)
-    print(eval_results)
+    tf.estimator.train_and_evaluate(
+        estimator, train_spec, eval_spec)
 
 
 if __name__ == '__main__':
-    tf.logging.set_verbosity(tf.logging.INFO)
     main()
